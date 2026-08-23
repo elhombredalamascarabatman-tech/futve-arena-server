@@ -1,0 +1,4 @@
+node_modules
+test_e2e.js
+test_matchend.js
+*.log
