@@ -117,7 +117,7 @@ wss.on('connection', (ws) => {
           if (result.error === 'room_not_joinable') { send(ws, { type: 'error', message: 'Esa sala ya no admite jugadores.' }); return; }
           ws.role = 'guest';
           ws.roomCode = code;
-          send(ws, { type: 'roomJoined', code });
+          send(ws, { type: 'roomJoined', code, hostUsername: result.room.hostConn.username });
           send(result.room.hostConn, { type: 'guestJoined', username: ws.username });
           return;
         }
