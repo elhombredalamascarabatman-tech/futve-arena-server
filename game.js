@@ -111,6 +111,18 @@ class MatchRoom {
     // un jugador de verdad" (setInput, switchTeam, reclaimSlot, etc.) sigue
     // funcionando sin tocarlo — ver addSpectator() más abajo.
     this.spectators = [];
+
+    // Votación de capitán de la sala (pasada nueva — ver informe). Solo
+    // puede existir UNA vez a la vez (this.captainVote es null o el objeto
+    // de la votación activa) y solo mientras this.status === 'waiting'.
+    // Forma de this.captainVote cuando hay una votación activa:
+    //   { candidates: [{team,slot,uid,username,conn}], votesByUid: Map<uid,
+    //     "team:slot">, durationMs, endsAt, timer }
+    // votesByUid guarda el ÚLTIMO voto de cada uid (Map.set sobreescribe),
+    // así "cambiar el voto antes de que termine" (pedido explícito del
+    // dueño) sale gratis con la estructura de datos correcta, sin lógica
+    // aparte.
+    this.captainVote = null;
   }
 
   humanCount() {
@@ -199,6 +211,236 @@ class MatchRoom {
     return out;
   }
 
+  // ============================================================
+  // VOTACIÓN DE CAPITÁN DE LA SALA (pasada nueva).
+  //
+  // Alcance: SIEMPRE una sola sala (este ARENAFUT room), nunca una
+  // "jornada"/temporada — no existe ningún concepto de liga/copa/torneo en
+  // este proyecto y esta votación no lo introduce. Solo puede arrancarla el
+  // anfitrión actual, solo mientras this.status === 'waiting', y solo si hay
+  // al menos 2 participantes reales conectados (host incluido). Los
+  // candidatos son una FOTO tomada en el instante de arrancar — quien se une
+  // después ya no entra como candidato, pero SÍ puede votar por alguno de
+  // los que ya estaban (ver castVote).
+  //
+  // Decisión documentada — ¿pueden votar los espectadores?: SÍ. Mirar una
+  // votación de capitán de una sala ajena y no poder participar se sintió
+  // más arbitrario que útil, y no hay ningún riesgo de integridad del
+  // partido en juego (los espectadores nunca controlan un disco ni afectan
+  // la física) — así que cualquier conexión ya identificada en esta sala,
+  // sea jugador o espectador, tiene un voto.
+  //
+  // Decisión documentada — empate: gana el anfitrión ACTUAL si está entre
+  // los empatados y sigue conectado; si no, gana el candidato conectado que
+  // apareció primero en el snapshot de candidatos (orden de participants():
+  // home ascendente por slot, luego away ascendente por slot) — un orden
+  // determinístico y reproducible, no un sorteo.
+  //
+  // Decisión documentada — candidato desconectado a mitad de votación: sus
+  // votos SIGUEN contando (no se le retiran), pero si termina siendo el más
+  // votado y ya no está conectado en el mismo (team, slot) del snapshot, NO
+  // se le reasigna el capitanazgo a un slot vacío/ajeno — se pasa al
+  // siguiente candidato más votado que sí siga conectado. Si ningún
+  // candidato con votos sigue conectado, la votación termina sin ganador
+  // (el capitán actual se queda como está).
+  _voteKey(team, slot) { return team + ':' + slot; }
+
+  // Host-only (verificado en index.js vía ws.role === 'host', igual que
+  // start()). Devuelve {ok:true} o {error:'not_waiting'|'vote_active'|
+  // 'not_enough_players'}.
+  startCaptainVote() {
+    if (this.status !== 'waiting') return { error: 'not_waiting' };
+    if (this.captainVote) return { error: 'vote_active' };
+
+    const candidates = this.participants().map((p) => {
+      const conns = p.team === 'home' ? this.homeConns : this.awayConns;
+      const conn = conns[p.slot];
+      return { team: p.team, slot: p.slot, uid: conn.uid, username: p.username, conn };
+    });
+    if (candidates.length < 2) return { error: 'not_enough_players' };
+
+    const durationMs = 20000; // 20s fijos, autoritativo en servidor — ver informe.
+    const endsAt = Date.now() + durationMs;
+    this.captainVote = {
+      candidates,
+      votesByUid: new Map(),
+      durationMs,
+      endsAt,
+      timer: setTimeout(() => this._endCaptainVote(false), durationMs),
+    };
+
+    this.broadcast({
+      type: 'captainVoteStarted',
+      candidates: candidates.map((c) => ({ team: c.team, slot: c.slot, uid: c.uid, username: c.username })),
+      durationMs,
+      endsAt,
+    });
+    return { ok: true };
+  }
+
+  // Cualquier conexión ya identificada en la sala (jugador o espectador,
+  // decisión documentada arriba) puede votar por cualquier candidato del
+  // snapshot, incluido a sí misma. Un voto repetido de la misma uid
+  // reemplaza al anterior (Map.set) — "cambiar el voto" sale gratis.
+  // Devuelve {ok:true} o {error:'no_active_vote'|'not_in_room'|'invalid_candidate'}.
+  castVote(conn, candidateTeam, candidateSlot) {
+    if (!this.captainVote) return { error: 'no_active_vote' };
+    if (!conn.uid) return { error: 'not_in_room' };
+    const isPlayer = this.allConns().includes(conn);
+    const isSpectator = this.spectators.includes(conn);
+    if (!isPlayer && !isSpectator) return { error: 'not_in_room' };
+
+    const candidate = this.captainVote.candidates.find(
+      (c) => c.team === candidateTeam && c.slot === candidateSlot
+    );
+    if (!candidate) return { error: 'invalid_candidate' };
+
+    this.captainVote.votesByUid.set(conn.uid, this._voteKey(candidateTeam, candidateSlot));
+    this._broadcastCaptainVoteUpdate();
+    return { ok: true };
+  }
+
+  // Tabulado en vivo (conteos únicamente — no se difunde quién votó a quién,
+  // decisión documentada: mantiene el payload simple y evita cualquier duda
+  // de "voto secreto" dentro de un grupo de amigos jugando la misma sala).
+  _tallyCaptainVote() {
+    const vote = this.captainVote;
+    const counts = new Map();
+    vote.candidates.forEach((c) => counts.set(this._voteKey(c.team, c.slot), 0));
+    for (const key of vote.votesByUid.values()) {
+      if (counts.has(key)) counts.set(key, counts.get(key) + 1);
+    }
+    return vote.candidates.map((c) => ({
+      team: c.team,
+      slot: c.slot,
+      uid: c.uid,
+      username: c.username,
+      votes: counts.get(this._voteKey(c.team, c.slot)) || 0,
+    }));
+  }
+
+  _broadcastCaptainVoteUpdate() {
+    if (!this.captainVote) return;
+    const tally = this._tallyCaptainVote();
+    this.broadcast({
+      type: 'captainVoteUpdate',
+      tally,
+      totalVotes: this.captainVote.votesByUid.size,
+    });
+  }
+
+  // Snapshot para alguien que se une a una sala CON una votación ya en
+  // curso (join a mitad de votación): le permite a su cliente pintar el
+  // panel de votación de una, sin esperar al próximo captainVoteUpdate.
+  captainVoteSnapshot() {
+    if (!this.captainVote) return null;
+    return {
+      candidates: this.captainVote.candidates.map((c) => ({ team: c.team, slot: c.slot, uid: c.uid, username: c.username })),
+      durationMs: this.captainVote.durationMs,
+      endsAt: this.captainVote.endsAt,
+      tally: this._tallyCaptainVote(),
+    };
+  }
+
+  // Determina si un candidato del snapshot sigue realmente conectado EN EL
+  // MISMO (team, slot) que tenía cuando arrancó la votación — igual que el
+  // resto del archivo, se compara la referencia de conexión exacta (no solo
+  // el uid), así que un reemplazo de ese slot por otra persona (no debería
+  // poder pasar en 'waiting' sin pasar antes por handleDisconnect) tampoco
+  // cuenta como "el candidato original sigue ahí".
+  _captainCandidateStillConnected(c) {
+    const conns = c.team === 'home' ? this.homeConns : this.awayConns;
+    return conns[c.slot] === c.conn && c.conn.readyState === 1;
+  }
+
+  // Cierra la votación (por timeout real o por cancelación forzada — ver
+  // handleDisconnect). cancelled=true se usa EXCLUSIVAMENTE cuando el
+  // anfitrión se desconecta a mitad de votación y la promoción automática
+  // (red de seguridad existente, ver handleDisconnect) ya resolvió quién
+  // manda — en ese caso no se tabula nada ni se reasigna nada más, solo se
+  // avisa a todos que la votación quedó sin efecto.
+  _endCaptainVote(cancelled) {
+    if (!this.captainVote) return;
+    const vote = this.captainVote;
+    if (vote.timer) clearTimeout(vote.timer);
+    this.captainVote = null;
+
+    if (cancelled) {
+      this.broadcast({ type: 'captainVoteEnded', cancelled: true, tally: [], winner: null });
+      return;
+    }
+
+    const counts = new Map();
+    vote.candidates.forEach((c) => counts.set(this._voteKey(c.team, c.slot), 0));
+    for (const key of vote.votesByUid.values()) {
+      if (counts.has(key)) counts.set(key, counts.get(key) + 1);
+    }
+    const votesOf = (c) => counts.get(this._voteKey(c.team, c.slot)) || 0;
+    const maxVotes = vote.candidates.reduce((m, c) => Math.max(m, votesOf(c)), 0);
+
+    let winnerCandidate = null;
+    if (maxVotes > 0) {
+      const tied = vote.candidates.filter((c) => votesOf(c) === maxVotes);
+      const hostTied = tied.find(
+        (c) => c.team === this.hostConn.team && c.slot === this.hostConn.slot
+      );
+      if (hostTied && this._captainCandidateStillConnected(hostTied)) {
+        winnerCandidate = hostTied;
+      } else {
+        winnerCandidate = tied.find((c) => this._captainCandidateStillConnected(c)) || null;
+      }
+      // Ningún empatado sigue conectado: cae al siguiente más votado (de
+      // entre TODOS los candidatos, no solo los empatados en el máximo) que
+      // siga conectado y tenga al menos un voto — ver decisión documentada
+      // arriba sobre "candidato desconectado a mitad de votación".
+      if (!winnerCandidate) {
+        const byVotesDesc = vote.candidates.slice().sort((a, b) => votesOf(b) - votesOf(a));
+        winnerCandidate = byVotesDesc.find((c) => votesOf(c) > 0 && this._captainCandidateStillConnected(c)) || null;
+      }
+    }
+
+    const tally = vote.candidates.map((c) => ({
+      team: c.team, slot: c.slot, uid: c.uid, username: c.username, votes: votesOf(c),
+    }));
+
+    if (winnerCandidate) {
+      const alreadyHost = this.hostConn.team === winnerCandidate.team && this.hostConn.slot === winnerCandidate.slot;
+      if (!alreadyHost) {
+        // Mismo camino EXACTO que la reasignación automática por
+        // desconexión (ver handleDisconnect más abajo): reutiliza
+        // 'hostChanged'/'roomUpdate' tal cual, para que la corona/badge
+        // "ANFITRIÓN" del cliente se actualice sin ningún código nuevo.
+        this.hostConn = winnerCandidate.conn;
+        winnerCandidate.conn.role = 'host';
+        this.broadcast({
+          type: 'hostChanged',
+          team: winnerCandidate.team,
+          slot: winnerCandidate.slot,
+          username: winnerCandidate.conn.username || 'Jugador',
+          reason: 'vote',
+        });
+        this.broadcast({
+          type: 'roomUpdate',
+          format: this.format,
+          slotsPerSide: this.slotsPerSide,
+          participants: this.participants(),
+          full: this.isFull(),
+          hostTeam: this.hostConn.team,
+          hostSlot: this.hostConn.slot,
+        });
+      }
+    }
+
+    this.broadcast({
+      type: 'captainVoteEnded',
+      cancelled: false,
+      tally,
+      winner: winnerCandidate
+        ? { team: winnerCandidate.team, slot: winnerCandidate.slot, uid: winnerCandidate.uid, username: winnerCandidate.username }
+        : null,
+    });
+  }
+
   // Modo espectador (pasada nueva): agrega `conn` a la lista de miradores de
   // esta sala. Sin límite de cupo — los espectadores no ocupan un slot, así
   // que no hay noción de "sala llena" que les aplique. A propósito NO se le
@@ -225,6 +467,10 @@ class MatchRoom {
       scoreAway: this.sim.scoreAway,
       timeLeft: this.sim.timeLeft,
       state: this.status === 'playing' ? this.sim.getSnapshot() : null,
+      // Votación de capitán ya en curso (pasada nueva): permite pintar el
+      // panel de votación de una si alguien entra a mitad de votación, sin
+      // esperar al próximo captainVoteUpdate.
+      activeCaptainVote: this.captainVoteSnapshot(),
     };
   }
 
@@ -410,6 +656,16 @@ class MatchRoom {
     }
 
     if (conn === this.hostConn) {
+      // Votación de capitán en curso (pasada nueva) + el anfitrión se
+      // desconecta: la red de seguridad existente (promoción automática/
+      // determinística, ver más abajo) SIEMPRE gana — se cancela la
+      // votación de inmediato (broadcast 'captainVoteEnded' con
+      // cancelled:true, sin ganador-por-voto) para no dejarla viva ni
+      // arriesgar una doble reasignación de anfitrión. Se hace ANTES de
+      // calcular el reemplazo para que quede irrelevante si termina
+      // habiendo reemplazo o no (ambos casos cancelan la votación igual).
+      if (this.captainVote) this._endCaptainVote(true);
+
       // Libera el slot que ocupaba el anfitrión (pudo haberse cambiado de
       // equipo con switchTeam() — regla 66 — así que NO asumimos home#0).
       // También limpia homeUids/awayUids: el anfitrión que se fue ANTES de
@@ -437,6 +693,7 @@ class MatchRoom {
           team: replacement.team,
           slot: replacement.slot,
           username: replacement.username || 'Jugador',
+          reason: 'disconnect',
         });
         this.broadcast({
           type: 'roomUpdate',
