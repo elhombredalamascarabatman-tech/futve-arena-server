@@ -84,6 +84,18 @@ class MatchRoom {
     hostConn.team = 'home';
     hostConn.slot = 0;
 
+    // Identidad (uid de Firebase) dueña de cada slot, en paralelo a
+    // homeConns/awayConns pero que NO se borra cuando la conexión se cae —
+    // a diferencia de homeConns/awayConns (que sí se ponen a null en una
+    // desconexión), esto sobrevive mientras el partido siga 'playing', para
+    // que reclaimSlot() pueda saber a quién le pertenece un slot que ahora
+    // es bot. Se limpia explícitamente a null solo cuando el slot deja de
+    // ser "reclamable" de verdad (se va alguien ANTES de que arranque la
+    // partida — ver handleDisconnect, rama 'waiting').
+    this.homeUids = new Array(this.slotsPerSide).fill(null);
+    this.awayUids = new Array(this.slotsPerSide).fill(null);
+    this.homeUids[0] = hostConn.uid;
+
     this._nextJoinTeam = 'away'; // política de alternancia, ver cabecera del archivo
 
     this._interval = null;
@@ -111,6 +123,8 @@ class MatchRoom {
       conns[slot] = guestConn;
       guestConn.team = team;
       guestConn.slot = slot;
+      const uids = team === 'home' ? this.homeUids : this.awayUids;
+      uids[slot] = guestConn.uid;
       return { team, slot };
     };
 
@@ -147,6 +161,8 @@ class MatchRoom {
     const toTeam = fromTeam === 'home' ? 'away' : 'home';
     const fromConns = fromTeam === 'home' ? this.homeConns : this.awayConns;
     const toConns = toTeam === 'home' ? this.homeConns : this.awayConns;
+    const fromUids = fromTeam === 'home' ? this.homeUids : this.awayUids;
+    const toUids = toTeam === 'home' ? this.homeUids : this.awayUids;
 
     const targetSlot = toConns.findIndex((c) => c === null);
     if (targetSlot === -1) return { error: 'team_full' };
@@ -157,7 +173,9 @@ class MatchRoom {
     if (fromConns[conn.slot] !== conn) return { error: 'not_in_room' };
 
     fromConns[conn.slot] = null;
+    fromUids[conn.slot] = null;
     toConns[targetSlot] = conn;
+    toUids[targetSlot] = conn.uid;
     conn.team = toTeam;
     conn.slot = targetSlot;
     return { team: toTeam, slot: targetSlot };
@@ -176,6 +194,58 @@ class MatchRoom {
     if (!conn.team || conn.slot == null) return;
     const v = inputToVector(buttons);
     this.sim.setInput(conn.team, conn.slot, v);
+  }
+
+  // Reconexión al mismo puesto (mitad de partido, regla nueva). Busca entre
+  // homeUids/awayUids un slot cuyo dueño registrado sea conn.uid Y que en
+  // este momento sea un slot-bot de verdad (isBotSlot) — esto último es
+  // defensivo: si por algún motivo ya hay un humano ahí (no debería poder
+  // pasar en el flujo normal), no lo pisa. Nota de diseño deliberada: NO se
+  // reconcilia this.hostConn/rol de anfitrión aquí — a mitad de partido
+  // startMatch ya se usó y ninguna acción restante depende de 'role' o de
+  // quién sea this.hostConn, así que un anfitrión reconectado NO recupera
+  // el rol de capitán si ya fue reemplazado por la reasignación automática
+  // (pasada anterior). Queda así a propósito, no es un descuido.
+  reclaimSlot(conn) {
+    if (this.status !== 'playing') return { error: 'not_playing' };
+
+    const findSlot = (uids, team) => {
+      for (let slot = 0; slot < uids.length; slot++) {
+        if (uids[slot] === conn.uid && this.sim.isBotSlot(team, slot)) return slot;
+      }
+      return -1;
+    };
+
+    let team = 'home';
+    let slot = findSlot(this.homeUids, 'home');
+    if (slot === -1) { team = 'away'; slot = findSlot(this.awayUids, 'away'); }
+    if (slot === -1) return { error: 'no_reclaim' };
+
+    const conns = team === 'home' ? this.homeConns : this.awayConns;
+    conns[slot] = conn;
+    conn.team = team;
+    conn.slot = slot;
+    this.sim.convertToHuman(team, slot);
+
+    this._notifyOthers(conn, {
+      type: 'slotReclaimed',
+      team,
+      slot,
+      username: conn.username || 'Jugador',
+    });
+
+    return {
+      team,
+      slot,
+      format: this.format,
+      formationKey: this.formationKey,
+      slotsPerSide: this.slotsPerSide,
+      scoreHome: this.sim.scoreHome,
+      scoreAway: this.sim.scoreAway,
+      timeLeft: this.sim.timeLeft,
+      hostTeam: this.hostConn.team,
+      hostSlot: this.hostConn.slot,
+    };
   }
 
   broadcast(obj) {
@@ -292,8 +362,11 @@ class MatchRoom {
     if (conn === this.hostConn) {
       // Libera el slot que ocupaba el anfitrión (pudo haberse cambiado de
       // equipo con switchTeam() — regla 66 — así que NO asumimos home#0).
-      if (conn.team === 'home') this.homeConns[conn.slot] = null;
-      else if (conn.team === 'away') this.awayConns[conn.slot] = null;
+      // También limpia homeUids/awayUids: el anfitrión que se fue ANTES de
+      // arrancar la partida no debería poder "reclamar" nada más tarde con
+      // rejoinRoom — nunca llegó a jugar esta partida.
+      if (conn.team === 'home') { this.homeConns[conn.slot] = null; this.homeUids[conn.slot] = null; }
+      else if (conn.team === 'away') { this.awayConns[conn.slot] = null; this.awayUids[conn.slot] = null; }
 
       // Busca reemplazo entre los humanos que quedan (ya sin `conn`, que
       // acabamos de sacar de los arrays de arriba): home por índice
@@ -334,8 +407,12 @@ class MatchRoom {
       return { removeRoom: true };
     }
 
-    if (conn.team === 'home') this.homeConns[conn.slot] = null;
-    else if (conn.team === 'away') this.awayConns[conn.slot] = null;
+    // Mismo motivo que arriba: alguien que se va ANTES de arrancar no debe
+    // poder reclamar ese slot después (p.ej. si termina siendo un slot-bot
+    // en la partida real que arranca luego con otra gente) — nunca llegó a
+    // jugarla.
+    if (conn.team === 'home') { this.homeConns[conn.slot] = null; this.homeUids[conn.slot] = null; }
+    else if (conn.team === 'away') { this.awayConns[conn.slot] = null; this.awayUids[conn.slot] = null; }
     this.broadcast({
       type: 'roomUpdate',
       format: this.format,
