@@ -108,7 +108,7 @@ wss.on('connection', (ws) => {
           const room = rooms.createRoom(ws, format, formationKey);
           ws.role = 'host';
           ws.roomCode = room.code;
-          send(ws, { type: 'roomCreated', code: room.code, format: room.format, formationKey: room.formationKey, slotsPerSide: room.slotsPerSide });
+          send(ws, { type: 'roomCreated', code: room.code, format: room.format, formationKey: room.formationKey, slotsPerSide: room.slotsPerSide, hostTeam: room.hostConn.team, hostSlot: room.hostConn.slot });
           return;
         }
 
@@ -136,6 +136,8 @@ wss.on('connection', (ws) => {
             // cambio de equipo) desde el primer instante, sin esperar a un
             // 'roomUpdate' posterior. Campo nuevo, puramente aditivo.
             participants: room.participants(),
+            hostTeam: room.hostConn.team,
+            hostSlot: room.hostConn.slot,
           });
           // 'guestJoined' se mantiene EXACTAMENTE como antes (mismo tipo, mismo
           // payload, solo al anfitrión) para 1v1 — es el contrato que ya usa
@@ -147,7 +149,7 @@ wss.on('connection', (ws) => {
           if (room.format === '1v1') {
             send(room.hostConn, { type: 'guestJoined', username: ws.username });
           }
-          room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull() });
+          room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull(), hostTeam: room.hostConn.team, hostSlot: room.hostConn.slot });
           return;
         }
 
@@ -172,7 +174,7 @@ wss.on('connection', (ws) => {
           if (result.error === 'team_full') { send(ws, { type: 'error', message: 'El otro equipo ya está completo.' }); return; }
           if (result.error === 'not_in_room') { send(ws, { type: 'error', message: 'No estás en ninguna sala.' }); return; }
           send(ws, { type: 'teamSwitched', team: result.team, slot: result.slot });
-          room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull() });
+          room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull(), hostTeam: room.hostConn.team, hostSlot: room.hostConn.slot });
           return;
         }
 
