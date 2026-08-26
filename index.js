@@ -178,6 +178,31 @@ wss.on('connection', (ws) => {
           return;
         }
 
+        case 'rejoinRoom': {
+          // Reconexión al mismo puesto (regla nueva): la sala sigue
+          // 'playing', el slot de esta identidad (uid) se volvió bot al
+          // desconectarse, y ahora reclama ese mismo (team, slot) de
+          // vuelta. Usa 'rejoinFailed' (no el 'error' genérico) para TODOS
+          // los fallos de esta operación: el cliente puede recibir esto
+          // desde el menú principal de Arena, una pantalla que no tiene
+          // ningún contexto de sala/lobby activo, así que necesita un tipo
+          // propio que distinguir sin depender de qué pantalla está abierta.
+          if (!ws.uid) { send(ws, { type: 'error', message: 'Debes autenticarte primero.' }); return; }
+          const code = typeof msg.code === 'string' ? msg.code.trim().toUpperCase() : '';
+          const room = code ? rooms.getRoom(code) : null;
+          if (!room) { send(ws, { type: 'rejoinFailed', message: 'No existe una sala con ese código.' }); return; }
+          if (room.status !== 'playing') { send(ws, { type: 'rejoinFailed', message: 'Esa partida ya no está en curso.' }); return; }
+          const result = room.reclaimSlot(ws);
+          if (result.error === 'no_reclaim') {
+            send(ws, { type: 'rejoinFailed', message: 'No hay ningún puesto tuyo esperando en esa partida (puede que ya lo hayas recuperado en otra pestaña, o que la partida haya terminado).' });
+            return;
+          }
+          ws.role = 'guest';
+          ws.roomCode = code;
+          send(ws, { type: 'rejoinAccepted', code, ...result });
+          return;
+        }
+
         case 'input': {
           const room = ws.roomCode ? rooms.getRoom(ws.roomCode) : null;
           if (!room || !ws.role) return;
