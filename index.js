@@ -65,6 +65,8 @@ wss.on('connection', (ws) => {
   ws.username = null;
   ws.role = null; // 'host' | 'guest'
   ws.roomCode = null;
+  ws.team = null; // 'home' | 'away' (asignado al crear/unirse a una sala)
+  ws.slot = null; // índice dentro de ese equipo
 
   ws.on('pong', () => { ws.isAlive = true; });
 
@@ -101,10 +103,12 @@ wss.on('connection', (ws) => {
 
         case 'createRoom': {
           if (!ws.uid) { send(ws, { type: 'error', message: 'Debes autenticarte primero.' }); return; }
-          const room = rooms.createRoom(ws);
+          const format = typeof msg.format === 'string' ? msg.format : '1v1';
+          const formationKey = typeof msg.formationKey === 'string' ? msg.formationKey : null;
+          const room = rooms.createRoom(ws, format, formationKey);
           ws.role = 'host';
           ws.roomCode = room.code;
-          send(ws, { type: 'roomCreated', code: room.code });
+          send(ws, { type: 'roomCreated', code: room.code, format: room.format, formationKey: room.formationKey, slotsPerSide: room.slotsPerSide });
           return;
         }
 
@@ -115,10 +119,30 @@ wss.on('connection', (ws) => {
           const result = rooms.joinRoom(code, ws);
           if (result.error === 'room_not_found') { send(ws, { type: 'error', message: 'No existe una sala con ese código.' }); return; }
           if (result.error === 'room_not_joinable') { send(ws, { type: 'error', message: 'Esa sala ya no admite jugadores.' }); return; }
+          if (result.error === 'room_full') { send(ws, { type: 'error', message: 'Esa sala ya está completa.' }); return; }
           ws.role = 'guest';
           ws.roomCode = code;
-          send(ws, { type: 'roomJoined', code, hostUsername: result.room.hostConn.username });
-          send(result.room.hostConn, { type: 'guestJoined', username: ws.username });
+          const room = result.room;
+          send(ws, {
+            type: 'roomJoined',
+            code,
+            format: room.format,
+            formationKey: room.formationKey,
+            slotsPerSide: room.slotsPerSide,
+            team: result.team,
+            slot: result.slot,
+            hostUsername: room.hostConn.username,
+          });
+          // 'guestJoined' se mantiene EXACTAMENTE como antes (mismo tipo, mismo
+          // payload) solo para 1v1 — es el contrato que ya usa el cliente 1v1
+          // (habilita el botón de empezar en la sala de espera). Para 4v4/7v7
+          // (varios humanos posibles por sala) se usa en su lugar 'roomUpdate',
+          // que lleva el roster completo, hacia TODOS los conectados.
+          if (room.format === '1v1') {
+            send(room.hostConn, { type: 'guestJoined', username: ws.username });
+          } else {
+            room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull() });
+          }
           return;
         }
 
@@ -135,7 +159,9 @@ wss.on('connection', (ws) => {
           if (!room || !ws.role) return;
           // Solo se aceptan botones de dirección + estado de disparo — NUNCA
           // coordenadas. inputToVector() ignora cualquier otro campo del mensaje.
-          room.setInput(ws.role, msg.buttons);
+          // Se enruta por (team, slot) de ESTA conexión, asignado al unirse —
+          // así cada humano mueve exactamente su propio disco, en cualquier formato.
+          room.setInput(ws, msg.buttons);
           return;
         }
 
@@ -160,11 +186,13 @@ function cleanupConnection(ws) {
   if (!ws.roomCode) return;
   const room = rooms.getRoom(ws.roomCode);
   if (room) {
-    room.handleDisconnect(ws.role);
-    rooms.removeRoom(ws.roomCode);
+    const { removeRoom } = room.handleDisconnect(ws);
+    if (removeRoom) rooms.removeRoom(ws.roomCode);
   }
   ws.roomCode = null;
   ws.role = null;
+  ws.team = null;
+  ws.slot = null;
 }
 
 // Ping/pong para detectar conexiones muertas (móviles que pierden la red, etc.)
