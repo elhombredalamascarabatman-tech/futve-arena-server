@@ -138,6 +138,10 @@ wss.on('connection', (ws) => {
             participants: room.participants(),
             hostTeam: room.hostConn.team,
             hostSlot: room.hostConn.slot,
+            // Votación de capitán ya en curso (pasada nueva): si alguien se
+            // une a mitad de una votación, su cliente puede pintar el panel
+            // de una sin esperar al próximo captainVoteUpdate.
+            activeCaptainVote: room.captainVoteSnapshot(),
           });
           // 'guestJoined' se mantiene EXACTAMENTE como antes (mismo tipo, mismo
           // payload, solo al anfitrión) para 1v1 — es el contrato que ya usa
@@ -175,6 +179,39 @@ wss.on('connection', (ws) => {
           if (result.error === 'not_in_room') { send(ws, { type: 'error', message: 'No estás en ninguna sala.' }); return; }
           send(ws, { type: 'teamSwitched', team: result.team, slot: result.slot });
           room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull(), hostTeam: room.hostConn.team, hostSlot: room.hostConn.slot });
+          return;
+        }
+
+        case 'startCaptainVote': {
+          // Votación de capitán de la sala (pasada nueva). Host-only, mismo
+          // criterio de verificación que 'startMatch' (ws.role === 'host').
+          // Un segundo intento mientras ya hay una votación activa se
+          // ignora en silencio (result.error === 'vote_active') — el propio
+          // botón del cliente ya se deshabilita mientras hay una votación
+          // en curso, así que esto solo defiende contra un doble-click/
+          // condición de carrera, no hace falta avisar con un error visible.
+          const room = ws.roomCode ? rooms.getRoom(ws.roomCode) : null;
+          if (!room || ws.role !== 'host') { send(ws, { type: 'error', message: 'Solo el anfitrión puede iniciar una votación de capitán.' }); return; }
+          const result = room.startCaptainVote();
+          if (result.error === 'not_waiting') { send(ws, { type: 'error', message: 'Solo se puede votar capitán antes de empezar la partida.' }); return; }
+          if (result.error === 'not_enough_players') { send(ws, { type: 'error', message: 'Hace falta al menos 2 jugadores en la sala para votar capitán.' }); return; }
+          // 'vote_active': ignorado en silencio, ver comentario arriba.
+          return;
+        }
+
+        case 'castVote': {
+          // Voto de capitán (pasada nueva). Cualquier conexión identificada
+          // en la sala (jugador o espectador — decisión documentada en
+          // MatchRoom.castVote, game.js) puede votar por cualquier
+          // candidato del snapshot. Errores silenciosos a propósito (mismo
+          // criterio que 'input'): un voto inválido/tardío no merece
+          // interrumpir a nadie con un alert().
+          const room = ws.roomCode ? rooms.getRoom(ws.roomCode) : null;
+          if (!room || !ws.role) return;
+          const candidateTeam = (msg.candidateTeam === 'home' || msg.candidateTeam === 'away') ? msg.candidateTeam : null;
+          const candidateSlot = Number.isInteger(msg.candidateSlot) ? msg.candidateSlot : null;
+          if (!candidateTeam || candidateSlot === null) return;
+          room.castVote(ws, candidateTeam, candidateSlot);
           return;
         }
 
