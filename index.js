@@ -203,6 +203,25 @@ wss.on('connection', (ws) => {
           return;
         }
 
+        case 'spectateRoom': {
+          // Modo espectador (pasada nueva): entra a una sala EXISTENTE
+          // (en espera o ya en curso) solo para mirar, nunca como jugador.
+          // Ver MatchRoom.addSpectator() en game.js para el detalle de por
+          // qué nunca se le asigna team/slot.
+          if (!ws.uid) { send(ws, { type: 'error', message: 'Debes autenticarte primero.' }); return; }
+          const code = typeof msg.code === 'string' ? msg.code.trim().toUpperCase() : '';
+          const room = code ? rooms.getRoom(code) : null;
+          if (!room || room.status === 'ended') {
+            send(ws, { type: 'spectateFailed', message: 'No existe una sala en curso con ese código.' });
+            return;
+          }
+          ws.role = 'spectator';
+          ws.roomCode = code;
+          const result = room.addSpectator(ws);
+          send(ws, { type: 'spectateJoined', code, ...result });
+          return;
+        }
+
         case 'input': {
           const room = ws.roomCode ? rooms.getRoom(ws.roomCode) : null;
           if (!room || !ws.role) return;
