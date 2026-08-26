@@ -132,17 +132,22 @@ wss.on('connection', (ws) => {
             team: result.team,
             slot: result.slot,
             hostUsername: room.hostConn.username,
+            // Añadido para que el invitado pueda pintar el roster (y el
+            // cambio de equipo) desde el primer instante, sin esperar a un
+            // 'roomUpdate' posterior. Campo nuevo, puramente aditivo.
+            participants: room.participants(),
           });
           // 'guestJoined' se mantiene EXACTAMENTE como antes (mismo tipo, mismo
-          // payload) solo para 1v1 — es el contrato que ya usa el cliente 1v1
-          // (habilita el botón de empezar en la sala de espera). Para 4v4/7v7
-          // (varios humanos posibles por sala) se usa en su lugar 'roomUpdate',
-          // que lleva el roster completo, hacia TODOS los conectados.
+          // payload, solo al anfitrión) para 1v1 — es el contrato que ya usa
+          // el cliente 1v1 (habilita el botón de empezar en la sala de
+          // espera). Ahora que el cambio de equipo (regla 66) aplica también
+          // a 1v1, ADEMÁS se difunde 'roomUpdate' con el roster completo a
+          // TODOS los conectados (como ya se hacía solo para 4v4/7v7) — esto
+          // es puramente aditivo, no reemplaza ni modifica 'guestJoined'.
           if (room.format === '1v1') {
             send(room.hostConn, { type: 'guestJoined', username: ws.username });
-          } else {
-            room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull() });
           }
+          room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull() });
           return;
         }
 
@@ -151,6 +156,23 @@ wss.on('connection', (ws) => {
           if (!room || ws.role !== 'host') { send(ws, { type: 'error', message: 'Solo el anfitrión puede iniciar la partida.' }); return; }
           const ok = room.start();
           if (!ok) send(ws, { type: 'error', message: 'La sala no está lista todavía.' });
+          return;
+        }
+
+        case 'switchTeam': {
+          // Regla 66: antes de arrancar, cualquier humano ya unido puede
+          // cambiarse de equipo si hay hueco en el otro. Ver
+          // MatchRoom.switchTeam() en game.js para el detalle de cómo se
+          // reasigna (team, slot) y por qué el enrutado de 'input'
+          // posterior no puede quedar apuntando a un slot viejo.
+          const room = ws.roomCode ? rooms.getRoom(ws.roomCode) : null;
+          if (!room) { send(ws, { type: 'error', message: 'No estás en ninguna sala.' }); return; }
+          const result = room.switchTeam(ws);
+          if (result.error === 'already_started') { send(ws, { type: 'error', message: 'La partida ya empezó: no puedes cambiar de equipo.' }); return; }
+          if (result.error === 'team_full') { send(ws, { type: 'error', message: 'El otro equipo ya está completo.' }); return; }
+          if (result.error === 'not_in_room') { send(ws, { type: 'error', message: 'No estás en ninguna sala.' }); return; }
+          send(ws, { type: 'teamSwitched', team: result.team, slot: result.slot });
+          room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull() });
           return;
         }
 
