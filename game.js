@@ -102,6 +102,15 @@ class MatchRoom {
     this._tickCount = 0;
     this.status = 'waiting'; // waiting -> playing -> ended
     this.createdAt = Date.now();
+
+    // Espectadores (modo espectador — pasada nueva): conexiones que solo
+    // miran, nunca jugadores. Deliberadamente separado de homeConns/
+    // awayConns: no ocupan slot, no cuentan para humanCount()/isFull(), y no
+    // se les asigna conn.team/conn.slot (quedan undefined/null), así todo el
+    // código existente que depende de conn.team/conn.slot para decidir "es
+    // un jugador de verdad" (setInput, switchTeam, reclaimSlot, etc.) sigue
+    // funcionando sin tocarlo — ver addSpectator() más abajo.
+    this.spectators = [];
   }
 
   humanCount() {
@@ -190,6 +199,35 @@ class MatchRoom {
     return out;
   }
 
+  // Modo espectador (pasada nueva): agrega `conn` a la lista de miradores de
+  // esta sala. Sin límite de cupo — los espectadores no ocupan un slot, así
+  // que no hay noción de "sala llena" que les aplique. A propósito NO se le
+  // asigna conn.team/conn.slot (quedan undefined/null): así setInput()
+  // ignora en silencio cualquier 'input' que mande (conn.team es falsy),
+  // switchTeam() devuelve {error:'not_in_room'} si lo intenta, y
+  // reclaimSlot() nunca lo encuentra en homeUids/awayUids. Ningún método de
+  // asignación de slots necesita cambios.
+  // Devuelve el snapshot completo que el cliente necesita para pintar la
+  // pantalla correcta de una (sala de espera o partido en curso).
+  addSpectator(conn) {
+    this.spectators.push(conn);
+    conn.role = 'spectator';
+    conn.roomCode = this.code;
+    return {
+      format: this.format,
+      formationKey: this.formationKey,
+      slotsPerSide: this.slotsPerSide,
+      status: this.status,
+      participants: this.participants(),
+      hostTeam: this.hostConn.team,
+      hostSlot: this.hostConn.slot,
+      scoreHome: this.sim.scoreHome,
+      scoreAway: this.sim.scoreAway,
+      timeLeft: this.sim.timeLeft,
+      state: this.status === 'playing' ? this.sim.getSnapshot() : null,
+    };
+  }
+
   setInput(conn, buttons) {
     if (!conn.team || conn.slot == null) return;
     const v = inputToVector(buttons);
@@ -250,7 +288,10 @@ class MatchRoom {
 
   broadcast(obj) {
     const msg = JSON.stringify(obj);
-    this.allConns().forEach((c) => {
+    // allConns() sigue siendo SOLO jugadores (isFull()/humanCount()/reparto
+    // de slots dependen de eso) — los espectadores se agregan aparte aquí,
+    // puramente para que también reciban todo lo que ya se difunde a todos.
+    this.allConns().concat(this.spectators).forEach((c) => {
       try { if (c.readyState === 1) c.send(msg); } catch (e) {}
     });
   }
@@ -344,6 +385,15 @@ class MatchRoom {
   //    cierra para el resto; si se va cualquier otro humano, simplemente
   //    libera su slot y la sala sigue siendo unible por los demás.
   handleDisconnect(conn) {
+    // Un espectador desconectándose nunca es un jugador que se va: no debe
+    // disparar reasignación de anfitrión, conversión a bot, ni ningún otro
+    // efecto sobre la partida real. Se revisa ANTES que cualquier otra rama.
+    const specIdx = this.spectators.indexOf(conn);
+    if (specIdx !== -1) {
+      this.spectators.splice(specIdx, 1);
+      return { removeRoom: false };
+    }
+
     if (this.status === 'playing') {
       if (conn.team && conn.slot != null && !this.sim.isBotSlot(conn.team, conn.slot)) {
         this.sim.convertToBot(conn.team, conn.slot);
@@ -427,7 +477,9 @@ class MatchRoom {
 
   _notifyOthers(conn, obj) {
     const msg = JSON.stringify(obj);
-    this.allConns().forEach((c) => {
+    // Mismo criterio que broadcast(): también llega a los espectadores
+    // (menos `conn` mismo, igual que ya hacía con los jugadores).
+    this.allConns().concat(this.spectators).forEach((c) => {
       if (c === conn) return;
       try { if (c.readyState === 1) c.send(msg); } catch (e) {}
     });
