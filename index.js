@@ -105,10 +105,34 @@ wss.on('connection', (ws) => {
           if (!ws.uid) { send(ws, { type: 'error', message: 'Debes autenticarte primero.' }); return; }
           const format = typeof msg.format === 'string' ? msg.format : '1v1';
           const formationKey = typeof msg.formationKey === 'string' ? msg.formationKey : null;
-          const room = rooms.createRoom(ws, format, formationKey);
+          // Formación personalizada (pasada nueva — editor de formación):
+          // validación defensiva de msg.customFormationPositions ANTES de
+          // pasarlo a rooms.createRoom/MatchSim — nunca se confía en un
+          // array/valores que vengan del cliente tal cual. Requisitos: el
+          // formato debe tener noción de formación (4v4/7v7, no 1v1), el
+          // array debe tener EXACTAMENTE la longitud de slots de ese formato
+          // (4 o 7), y cada entrada debe traer x/y numéricos finitos (se
+          // clampean a 0..1 en vez de rechazarse, igual de permisivo que el
+          // editor del cliente). Cualquier desvío hace que se descarte en
+          // silencio (customFormationPositions queda null) y la sala cae al
+          // comportamiento de siempre (lookup por formationKey/primer
+          // preset) — nunca se rechaza la creación de sala ni se tira la
+          // conexión por esto.
+          const expectedSlotCount = format === '4v4' ? 4 : format === '7v7' ? 7 : null;
+          let customFormationPositions = null;
+          if (expectedSlotCount && Array.isArray(msg.customFormationPositions) && msg.customFormationPositions.length === expectedSlotCount) {
+            const clamped = msg.customFormationPositions.map((p) => {
+              if (!p || typeof p !== 'object') return null;
+              const x = Number(p.x), y = Number(p.y);
+              if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+              return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
+            });
+            if (clamped.every(Boolean)) customFormationPositions = clamped;
+          }
+          const room = rooms.createRoom(ws, format, formationKey, customFormationPositions);
           ws.role = 'host';
           ws.roomCode = room.code;
-          send(ws, { type: 'roomCreated', code: room.code, format: room.format, formationKey: room.formationKey, slotsPerSide: room.slotsPerSide, hostTeam: room.hostConn.team, hostSlot: room.hostConn.slot });
+          send(ws, { type: 'roomCreated', code: room.code, format: room.format, formationKey: room.formationKey, customPositions: room.customPositions, slotsPerSide: room.slotsPerSide, hostTeam: room.hostConn.team, hostSlot: room.hostConn.slot });
           return;
         }
 
@@ -128,6 +152,7 @@ wss.on('connection', (ws) => {
             code,
             format: room.format,
             formationKey: room.formationKey,
+            customPositions: room.customPositions,
             slotsPerSide: room.slotsPerSide,
             team: result.team,
             slot: result.slot,
@@ -138,6 +163,10 @@ wss.on('connection', (ws) => {
             participants: room.participants(),
             hostTeam: room.hostConn.team,
             hostSlot: room.hostConn.slot,
+            // Votación de capitán ya en curso (pasada nueva): si alguien se
+            // une a mitad de una votación, su cliente puede pintar el panel
+            // de una sin esperar al próximo captainVoteUpdate.
+            activeCaptainVote: room.captainVoteSnapshot(),
           });
           // 'guestJoined' se mantiene EXACTAMENTE como antes (mismo tipo, mismo
           // payload, solo al anfitrión) para 1v1 — es el contrato que ya usa
@@ -175,6 +204,39 @@ wss.on('connection', (ws) => {
           if (result.error === 'not_in_room') { send(ws, { type: 'error', message: 'No estás en ninguna sala.' }); return; }
           send(ws, { type: 'teamSwitched', team: result.team, slot: result.slot });
           room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull(), hostTeam: room.hostConn.team, hostSlot: room.hostConn.slot });
+          return;
+        }
+
+        case 'startCaptainVote': {
+          // Votación de capitán de la sala (pasada nueva). Host-only, mismo
+          // criterio de verificación que 'startMatch' (ws.role === 'host').
+          // Un segundo intento mientras ya hay una votación activa se
+          // ignora en silencio (result.error === 'vote_active') — el propio
+          // botón del cliente ya se deshabilita mientras hay una votación
+          // en curso, así que esto solo defiende contra un doble-click/
+          // condición de carrera, no hace falta avisar con un error visible.
+          const room = ws.roomCode ? rooms.getRoom(ws.roomCode) : null;
+          if (!room || ws.role !== 'host') { send(ws, { type: 'error', message: 'Solo el anfitrión puede iniciar una votación de capitán.' }); return; }
+          const result = room.startCaptainVote();
+          if (result.error === 'not_waiting') { send(ws, { type: 'error', message: 'Solo se puede votar capitán antes de empezar la partida.' }); return; }
+          if (result.error === 'not_enough_players') { send(ws, { type: 'error', message: 'Hace falta al menos 2 jugadores en la sala para votar capitán.' }); return; }
+          // 'vote_active': ignorado en silencio, ver comentario arriba.
+          return;
+        }
+
+        case 'castVote': {
+          // Voto de capitán (pasada nueva). Cualquier conexión identificada
+          // en la sala (jugador o espectador — decisión documentada en
+          // MatchRoom.castVote, game.js) puede votar por cualquier
+          // candidato del snapshot. Errores silenciosos a propósito (mismo
+          // criterio que 'input'): un voto inválido/tardío no merece
+          // interrumpir a nadie con un alert().
+          const room = ws.roomCode ? rooms.getRoom(ws.roomCode) : null;
+          if (!room || !ws.role) return;
+          const candidateTeam = (msg.candidateTeam === 'home' || msg.candidateTeam === 'away') ? msg.candidateTeam : null;
+          const candidateSlot = Number.isInteger(msg.candidateSlot) ? msg.candidateSlot : null;
+          if (!candidateTeam || candidateSlot === null) return;
+          room.castVote(ws, candidateTeam, candidateSlot);
           return;
         }
 
@@ -235,6 +297,27 @@ wss.on('connection', (ws) => {
 
         case 'leave': {
           cleanupConnection(ws);
+          return;
+        }
+
+        // SOLO para pruebas locales/CI (ARENA_TEST_MODE=1): permite a un QA
+        // script forzar un gol real empujando el balón hacia una portería con
+        // velocidad, en vez de tener que jugar de verdad durante minutos para
+        // probar la repetición instantánea. La física del gol la sigue
+        // detectando el tick normal del servidor (nunca se fabrica el
+        // marcador directamente) — nunca disponible fuera de test mode.
+        case 'debugForceGoal': {
+          if (process.env.ARENA_TEST_MODE !== '1') return;
+          const room = ws.roomCode ? rooms.getRoom(ws.roomCode) : null;
+          if (!room || !room.sim) return;
+          const sim = room.sim;
+          const side = msg.side === 'away' ? 'away' : 'home';
+          // HOME ataca hacia x=width (gol a la derecha), AWAY hacia x=0.
+          sim.ball.x = side === 'home' ? sim.field.width - 20 : 20;
+          sim.ball.y = sim.field.height / 2;
+          sim.ball.vx = side === 'home' ? 400 : -400;
+          sim.ball.vy = 0;
+          sim.ball.owner = null;
           return;
         }
 
