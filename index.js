@@ -321,6 +321,18 @@ wss.on('connection', (ws) => {
           return;
         }
 
+        // SOLO para pruebas locales/CI (ARENA_TEST_MODE=1): arma un fallo
+        // forzado dentro del PRÓXIMO tick de esta sala, para verificar el
+        // aislamiento de fallos por sala (game.js _tick try/catch) sin dejar
+        // ninguna vía alcanzable en producción.
+        case 'debugForceTickThrow': {
+          if (process.env.ARENA_TEST_MODE !== '1') return;
+          const room = ws.roomCode ? rooms.getRoom(ws.roomCode) : null;
+          if (!room) return;
+          room._debugForceTickThrow = true;
+          return;
+        }
+
         default:
           return;
       }
@@ -360,6 +372,19 @@ const sweepInterval = setInterval(() => rooms.sweepStale(), 60000);
 
 server.listen(PORT, () => {
   console.log(`FUTVE Arena server escuchando en puerto ${PORT}`);
+});
+
+// Defensa en profundidad: cada sala ya aísla sus propios errores de tick
+// (game.js _tick try/catch) y cada handler de mensaje WS ya tiene su propio
+// try/catch. Estos son un segundo cinturón de seguridad para cualquier otro
+// error verdaderamente inesperado fuera de esos caminos — se registran y el
+// proceso sigue vivo (nunca process.exit()) para no tumbar el resto de salas.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException] Error no controlado a nivel de proceso:', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection] Promesa rechazada sin manejar:', reason);
 });
 
 process.on('SIGTERM', () => {
