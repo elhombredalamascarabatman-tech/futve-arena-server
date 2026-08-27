@@ -56,13 +56,13 @@ function genRoomCode() {
 // Convierte botones (up/down/left/right booleanos) a un vector de dirección
 // normalizado -1..1, exactamente como ArenaInput.getMoveVector() en el cliente.
 function inputToVector(buttons) {
-  if (!buttons || typeof buttons !== 'object') return { x: 0, y: 0, shootPressed: false };
+  if (!buttons || typeof buttons !== 'object') return { x: 0, y: 0, shootPressed: false, passPressed: false };
   let x = 0, y = 0;
   if (buttons.left) x -= 1;
   if (buttons.right) x += 1;
   if (buttons.up) y -= 1;
   if (buttons.down) y += 1;
-  return { x, y, shootPressed: !!buttons.shootPressed };
+  return { x, y, shootPressed: !!buttons.shootPressed, passPressed: !!buttons.passPressed };
 }
 
 function normalizeFormat(format) {
