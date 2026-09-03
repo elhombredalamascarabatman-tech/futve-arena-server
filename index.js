@@ -16,13 +16,13 @@
 //    servicio de Firebase pegada en la variable de entorno
 //    FIREBASE_SERVICE_ACCOUNT_JSON (ver COMO_PUBLICAR_SERVIDOR.md).
 // ============================================================
-
+ 
 const http = require('http');
 const WebSocket = require('ws');
 const { initializeApp, getApps, cert, applicationDefault } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
 const { RoomManager, inputToVector } = require('./game.js');
-
+ 
 if (getApps().length === 0) {
   if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
     let svcAccount;
@@ -39,10 +39,10 @@ if (getApps().length === 0) {
     initializeApp({ credential: applicationDefault() });
   }
 }
-
+ 
 const PORT = process.env.PORT || 8080;
 const rooms = new RoomManager();
-
+ 
 const server = http.createServer((req, res) => {
   if (req.url === '/health' || req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -52,13 +52,13 @@ const server = http.createServer((req, res) => {
   res.writeHead(404);
   res.end();
 });
-
+ 
 const wss = new WebSocket.Server({ server, path: '/ws' });
-
+ 
 function send(ws, obj) {
   try { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj)); } catch (e) {}
 }
-
+ 
 wss.on('connection', (ws) => {
   ws.isAlive = true;
   ws.uid = null;
@@ -67,14 +67,14 @@ wss.on('connection', (ws) => {
   ws.roomCode = null;
   ws.team = null; // 'home' | 'away' (asignado al crear/unirse a una sala)
   ws.slot = null; // índice dentro de ese equipo
-
+ 
   ws.on('pong', () => { ws.isAlive = true; });
-
+ 
   ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
     if (!msg || typeof msg.type !== 'string') return;
-
+ 
     try {
       switch (msg.type) {
         case 'auth': {
@@ -100,7 +100,7 @@ wss.on('connection', (ws) => {
           }
           return;
         }
-
+ 
         case 'createRoom': {
           if (!ws.uid) { send(ws, { type: 'error', message: 'Debes autenticarte primero.' }); return; }
           const format = typeof msg.format === 'string' ? msg.format : '1v1';
@@ -135,7 +135,7 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'roomCreated', code: room.code, format: room.format, formationKey: room.formationKey, customPositions: room.customPositions, slotsPerSide: room.slotsPerSide, hostTeam: room.hostConn.team, hostSlot: room.hostConn.slot });
           return;
         }
-
+ 
         case 'joinRoom': {
           if (!ws.uid) { send(ws, { type: 'error', message: 'Debes autenticarte primero.' }); return; }
           const code = typeof msg.code === 'string' ? msg.code.trim().toUpperCase() : '';
@@ -181,7 +181,7 @@ wss.on('connection', (ws) => {
           room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull(), hostTeam: room.hostConn.team, hostSlot: room.hostConn.slot });
           return;
         }
-
+ 
         case 'startMatch': {
           const room = ws.roomCode ? rooms.getRoom(ws.roomCode) : null;
           if (!room || ws.role !== 'host') { send(ws, { type: 'error', message: 'Solo el anfitrión puede iniciar la partida.' }); return; }
@@ -189,7 +189,7 @@ wss.on('connection', (ws) => {
           if (!ok) send(ws, { type: 'error', message: 'La sala no está lista todavía.' });
           return;
         }
-
+ 
         case 'switchTeam': {
           // Regla 66: antes de arrancar, cualquier humano ya unido puede
           // cambiarse de equipo si hay hueco en el otro. Ver
@@ -206,7 +206,7 @@ wss.on('connection', (ws) => {
           room.broadcast({ type: 'roomUpdate', format: room.format, slotsPerSide: room.slotsPerSide, participants: room.participants(), full: room.isFull(), hostTeam: room.hostConn.team, hostSlot: room.hostConn.slot });
           return;
         }
-
+ 
         case 'startCaptainVote': {
           // Votación de capitán de la sala (pasada nueva). Host-only, mismo
           // criterio de verificación que 'startMatch' (ws.role === 'host').
@@ -223,7 +223,7 @@ wss.on('connection', (ws) => {
           // 'vote_active': ignorado en silencio, ver comentario arriba.
           return;
         }
-
+ 
         case 'castVote': {
           // Voto de capitán (pasada nueva). Cualquier conexión identificada
           // en la sala (jugador o espectador — decisión documentada en
@@ -239,7 +239,7 @@ wss.on('connection', (ws) => {
           room.castVote(ws, candidateTeam, candidateSlot);
           return;
         }
-
+ 
         case 'rejoinRoom': {
           // Reconexión al mismo puesto (regla nueva): la sala sigue
           // 'playing', el slot de esta identidad (uid) se volvió bot al
@@ -264,7 +264,7 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'rejoinAccepted', code, ...result });
           return;
         }
-
+ 
         case 'spectateRoom': {
           // Modo espectador (pasada nueva): entra a una sala EXISTENTE
           // (en espera o ya en curso) solo para mirar, nunca como jugador.
@@ -283,7 +283,7 @@ wss.on('connection', (ws) => {
           send(ws, { type: 'spectateJoined', code, ...result });
           return;
         }
-
+ 
         case 'input': {
           const room = ws.roomCode ? rooms.getRoom(ws.roomCode) : null;
           if (!room || !ws.role) return;
@@ -294,12 +294,12 @@ wss.on('connection', (ws) => {
           room.setInput(ws, msg.buttons);
           return;
         }
-
+ 
         case 'leave': {
           cleanupConnection(ws);
           return;
         }
-
+ 
         // SOLO para pruebas locales/CI (ARENA_TEST_MODE=1): permite a un QA
         // script forzar un gol real empujando el balón hacia una portería con
         // velocidad, en vez de tener que jugar de verdad durante minutos para
@@ -320,7 +320,7 @@ wss.on('connection', (ws) => {
           sim.ball.owner = null;
           return;
         }
-
+ 
         // SOLO para pruebas locales/CI (ARENA_TEST_MODE=1): arma un fallo
         // forzado dentro del PRÓXIMO tick de esta sala, para verificar el
         // aislamiento de fallos por sala (game.js _tick try/catch) sin dejar
@@ -332,19 +332,27 @@ wss.on('connection', (ws) => {
           room._debugForceTickThrow = true;
           return;
         }
-
+ 
         default:
           return;
       }
     } catch (e) {
+      // Antes este catch no dejaba ningún rastro real del error (solo el
+      // mensaje genérico al cliente) — así que un fallo como el reportado
+      // (alert "Error interno del servidor." al arrancar una partida) no
+      // dejaba ninguna pista en los logs de Render para diagnosticarlo con
+      // certeza. Ahora se registra el tipo de mensaje que se estaba
+      // procesando y el stack completo, para que la próxima vez que esto
+      // pase alcance con mirar los logs del servicio en Render.
+      console.error(`[ws message] Error no controlado procesando '${msg && msg.type}':`, e);
       send(ws, { type: 'error', message: 'Error interno del servidor.' });
     }
   });
-
+ 
   ws.on('close', () => cleanupConnection(ws));
   ws.on('error', () => cleanupConnection(ws));
 });
-
+ 
 function cleanupConnection(ws) {
   if (!ws.roomCode) return;
   const room = rooms.getRoom(ws.roomCode);
@@ -357,7 +365,7 @@ function cleanupConnection(ws) {
   ws.team = null;
   ws.slot = null;
 }
-
+ 
 // Ping/pong para detectar conexiones muertas (móviles que pierden la red, etc.)
 const pingInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
@@ -366,14 +374,14 @@ const pingInterval = setInterval(() => {
     try { ws.ping(); } catch (e) {}
   });
 }, 30000);
-
+ 
 // Limpieza de salas abandonadas.
 const sweepInterval = setInterval(() => rooms.sweepStale(), 60000);
-
+ 
 server.listen(PORT, () => {
   console.log(`FUTVE Arena server escuchando en puerto ${PORT}`);
 });
-
+ 
 // Defensa en profundidad: cada sala ya aísla sus propios errores de tick
 // (game.js _tick try/catch) y cada handler de mensaje WS ya tiene su propio
 // try/catch. Estos son un segundo cinturón de seguridad para cualquier otro
@@ -382,16 +390,17 @@ server.listen(PORT, () => {
 process.on('uncaughtException', (err) => {
   console.error('[uncaughtException] Error no controlado a nivel de proceso:', err);
 });
-
+ 
 process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection] Promesa rechazada sin manejar:', reason);
 });
-
+ 
 process.on('SIGTERM', () => {
   clearInterval(pingInterval);
   clearInterval(sweepInterval);
   wss.clients.forEach((ws) => ws.terminate());
   server.close(() => process.exit(0));
 });
-
+ 
 module.exports = { server, wss, rooms };
+ 
