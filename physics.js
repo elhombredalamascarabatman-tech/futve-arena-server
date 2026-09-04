@@ -20,7 +20,11 @@ const CONFIG = {
   // un simple hueco en la pared). Deliberadamente NO depende del formato
   // (regla: sin constantes de física condicionales por formato) — mismo
   // radio en 1v1/4v4/7v7 aunque GOAL_WIDTH cambie entre formatos.
-  FIELD: { WIDTH: 900, HEIGHT: 560, GOAL_WIDTH: 140, GOAL_DEPTH: 22, GOAL_POST_RADIUS: 7 },
+  // Pasada nueva (pedido del dueño: "los campos un 50% más grande") —
+  // mismo x1.5 que ARENA_CONFIG.FIELD en el cliente (index.html):
+  // 900x560 -> 1350x840, GOAL_WIDTH/GOAL_DEPTH escalan igual.
+  // GOAL_POST_RADIUS sigue sin depender del formato (regla de siempre).
+  FIELD: { WIDTH: 1350, HEIGHT: 840, GOAL_WIDTH: 210, GOAL_DEPTH: 33, GOAL_POST_RADIUS: 7 },
   PLAYER: {
     RADIUS: 14,
     SPEED: 220,
@@ -91,9 +95,12 @@ const CONFIG = {
 // formato '1v1' NO tiene entrada aquí a propósito — sigue usando
 // siempre CONFIG.FIELD tal cual (ver MatchSim constructor).
 // ============================================================
+// Pasada nueva: mismos x1.5 que en el cliente (ver comentario junto a
+// CONFIG.FIELD más arriba) — 4v4: 760x620 -> 1140x930; 7v7: 1300x760 ->
+// 1950x1140.
 const ARENA_FORMAT_FIELD_SIZES = {
-  '4v4': { WIDTH: 760, HEIGHT: 620, GOAL_WIDTH: 155, GOAL_DEPTH: 22 },
-  '7v7': { WIDTH: 1300, HEIGHT: 760, GOAL_WIDTH: 190, GOAL_DEPTH: 24 },
+  '4v4': { WIDTH: 1140, HEIGHT: 930, GOAL_WIDTH: 233, GOAL_DEPTH: 33 },
+  '7v7': { WIDTH: 1950, HEIGHT: 1140, GOAL_WIDTH: 285, GOAL_DEPTH: 36 },
 };
  
 const ARENA_FORMATIONS = {
